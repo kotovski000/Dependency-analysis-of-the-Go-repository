@@ -125,7 +125,10 @@ func parseGoMod(goModPath string) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("error reading go.mod: %v", err)
 	}
-	data = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+
+	if bytes.Contains(data, []byte("\r\n")) {
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	}
 
 	modFile, err := modfile.Parse(goModPath, data, nil)
 	if err != nil {
