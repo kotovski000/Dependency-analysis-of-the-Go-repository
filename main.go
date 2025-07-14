@@ -9,9 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
-	"time"
 )
 
 type ModuleInfo struct {
@@ -30,31 +27,32 @@ func main() {
 	}
 
 	repoURL := os.Args[1]
-	tempDir, err := createTempDir()
+	temDir, err := os.MkdirTemp("", "go-dep-analysis")
 	if err != nil {
 		log.Fatalf("Error creating temporary directory: %v", err)
 	}
-	defer func() {
-		if err := cleanupTempDir(tempDir); err != nil {
-			log.Fatalf("Error cleaning up temporary directory: %v", err)
+	defer func(path string) {
+		err := os.RemoveAll(path)
+		if err != nil {
+			log.Fatalf("Error removing temporary directory: %v", err)
 		}
-	}()
+	}(temDir)
 
-	if err := cloneRepo(repoURL, tempDir); err != nil {
+	if err := cloneRepo(repoURL, temDir); err != nil {
 		log.Fatalf("Error cloning repository: %v", err)
 	}
 
-	goMopPath, err := findGoMod(tempDir)
+	goModPath, err := findGoMod(temDir)
 	if err != nil {
 		log.Fatalf("Error finding go.mod: %v", err)
 	}
 
-	moduleName, goVersion, err := parseGoMod(goMopPath)
+	moduleName, goVersion, err := parseGoMod(goModPath)
 	if err != nil {
 		log.Fatalf("Error parsing go.mod: %v", err)
 	}
 
-	deps, err := getDependencies(tempDir)
+	deps, err := getDependencies(temDir)
 	if err != nil {
 		log.Fatalf("Error getting dependencies: %v", err)
 	}
@@ -62,48 +60,18 @@ func main() {
 	printResults(moduleName, goVersion, deps)
 }
 
-func createTempDir() (string, error) {
-	if runtime.GOOS == "windows" {
-		tempDir := filepath.Join(os.TempDir(), "go-dep-analysis")
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
-			return "", fmt.Errorf("error creating temporary directory: %v", err)
-		}
-		return tempDir, nil
-	}
-	return os.MkdirTemp("", "go-dep-analysis")
-}
-
-func cleanupTempDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		for i := 0; i < 3; i++ {
-			if err := os.RemoveAll(dir); err == nil {
-				return nil
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		return fmt.Errorf("error removing temporary directory after 3 attempts")
-	}
-	return os.RemoveAll(dir)
-}
-
 func cloneRepo(url, dir string) error {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", "git", "clone", url, dir)
-	} else {
-		cmd = exec.Command("git", "clone", url, dir)
-	}
+	cmd := exec.Command("git", "clone", url, dir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("error cloning repository: %v", err)
+		return err
 	}
 	return nil
 }
 
 func findGoMod(dir string) (string, error) {
 	var goModPath string
-
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -114,49 +82,41 @@ func findGoMod(dir string) (string, error) {
 		}
 		return nil
 	})
-	if goModPath == "" {
-		return "", fmt.Errorf("could not find go.mod in %s", dir)
+	if err != nil {
+		return "", err
 	}
-	return goModPath, err
+	if goModPath == "" {
+		return "", fmt.Errorf("could not find go.mod")
+	}
+	return goModPath, nil
 }
 
-func parseGoMod(goModPath string) (string, string, error) {
+func parseGoMod(goModPath string) (modulePath, goVersion string, err error) {
 	data, err := os.ReadFile(goModPath)
 	if err != nil {
 		return "", "", fmt.Errorf("error reading go.mod: %v", err)
 	}
-
-	if bytes.Contains(data, []byte("\r\n")) {
-		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	}
-
 	modFile, err := modfile.Parse(goModPath, data, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("error parsing go.mod: %v", err)
 	}
+
 	if modFile.Module == nil {
-		return "", "", fmt.Errorf("module declaration not found")
+		return "", "", fmt.Errorf("could not find go.mod")
 	}
 
-	goVersion := "unknown"
-	if modFile.Go != nil {
-		goVersion = modFile.Go.Version
-	}
-	return modFile.Module.Mod.Path, goVersion, nil
+	return modFile.Module.Mod.Path, modFile.Go.Version, nil
 }
 
 func getDependencies(dir string) ([]ModuleInfo, error) {
-	if _, err := exec.LookPath("go"); err != nil {
-		return nil, fmt.Errorf("go command not found: %v", err)
-	}
-
 	cmd := exec.Command("go", "list", "-m", "-u", "-json", "all")
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
+
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("error listing dependencies: %v", err)
+		return nil, err
 	}
 
 	var deps []ModuleInfo
@@ -164,12 +124,9 @@ func getDependencies(dir string) ([]ModuleInfo, error) {
 	for dec.More() {
 		var m ModuleInfo
 		if err := dec.Decode(&m); err != nil {
-			return nil, fmt.Errorf("error decoding dependencies: %v", err)
+			return nil, err
 		}
-
-		normalizedPath := filepath.ToSlash(m.Path)
-		normalizedDir := filepath.ToSlash(dir)
-		if !strings.HasPrefix(normalizedPath, ".") && !strings.HasPrefix(normalizedPath, "/") && !strings.Contains(normalizedPath, normalizedDir) {
+		if m.Update != nil {
 			deps = append(deps, m)
 		}
 	}
